@@ -155,6 +155,9 @@ uint8 velocity_frame
 | `MPC_Z_P` | 垂直位置 P ゲイン |
 | `MPC_XY_VEL_P_ACC` / `_I_ACC` / `_D_ACC` | 水平速度 PID |
 | `MPC_Z_VEL_P_ACC` / `_I_ACC` / `_D_ACC` | 垂直速度 PID |
+| `MPC_VEL_NF_FRQ` / `MPC_VEL_NF_BW` | 速度のノッチフィルタ（既定 0 Hz = 無効 / 5 Hz） |
+| `MPC_VEL_LP` | 速度のローパス遮断周波数（既定 0 Hz = 無効） |
+| `MPC_VELD_LP` | **速度微分のローパス遮断周波数（既定 5 Hz、D 項のノイズ対策）** |
 | `MPC_XY_VEL_MAX` | 水平速度上限 [m/s] |
 | `MPC_Z_VEL_MAX_UP` / `MPC_Z_VEL_MAX_DN` | 上昇／下降速度上限 |
 | `MPC_XY_CRUISE` | 自律飛行時の巡航速度 |

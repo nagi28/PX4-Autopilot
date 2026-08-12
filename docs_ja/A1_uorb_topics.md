@@ -38,8 +38,8 @@
 
 ```
 x, y, z              位置 [m]（NED）
-vx, vy, vz           速度 [m/s]（NED）
-ax, ay, az           加速度 [m/s²]（NED）
+vx, vy, vz           速度 [m/s]（NED）    ★ 位置の微分ではなく EKF2 の独立した推定状態
+ax, ay, az           加速度 [m/s²]（NED）  ※ mc_pos_control は使わない（下記）
 heading              方位 [rad]
 
 xy_valid, z_valid            位置が有効か  ★制御前に確認する
@@ -56,6 +56,17 @@ delta_xy, delta_z, delta_heading                           ★ジャンプ量
 dist_bottom, dist_bottom_valid   地面までの距離
 ref_lat, ref_lon, ref_alt        ローカル原点の緯度経度高度
 ```
+
+> [!NOTE]
+> **1 トピックに位置・速度・加速度が同梱されています。**
+> 位置制御は位置だけでなく速度もフィードバックしており、
+> 実際には速度 PID が主役です。
+>
+> ただし **`ax/ay/az` は `mc_pos_control` が読んでいません**。
+> 位置制御の D 項に使う加速度は、制御器が
+> 「フィルタ済み速度を自分で微分する」形で作っています
+> （[04 章](04_control_cascade.md#_vel_dot-はどこから来るのか)）。
+> `ax/ay/az` の主な用途はログと他モジュールでの参照です。
 
 ---
 

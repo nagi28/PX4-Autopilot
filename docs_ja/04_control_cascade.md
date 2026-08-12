@@ -75,6 +75,22 @@
 **上の段ほど遅く、下の段ほど速い。** これがカスケード制御の基本です。
 外側のループは内側のループが十分速く追従することを前提に設計されています。
 
+> [!IMPORTANT]
+> **「駆動トピック」の数と、制御が使う物理量の数は違います。**
+> PX4 は関連する物理量を 1 つのメッセージにまとめて配るので、
+> トピックが 3 つでも中身はもっと多いです。
+>
+> | トピック | 同梱されている物理量 |
+> | --- | --- |
+> | `vehicle_local_position` | **位置**（`x/y/z`）＋ **速度**（`vx/vy/vz`）＋ 加速度（`ax/ay/az`）＋ 方位 ＋ 妥当性フラグ |
+> | `vehicle_attitude` | 姿勢クォータニオン（`q`） |
+> | `vehicle_angular_velocity` | **角速度**（`xyz`）＋ **角加速度**（`xyz_derivative`） |
+>
+> つまり位置制御は位置だけでなく **速度もフィードバックしています**。
+> 実際、位置制御の主役は速度 PID であり、位置 P 制御は
+> 「速度設定値を作る」ためだけに存在します。
+> 速度信号の詳しい扱いは [`_vel_dot` はどこから来るのか](#_vel_dot-はどこから来るのか) を参照してください。
+
 ---
 
 ## NaN イディオム
@@ -188,9 +204,63 @@ ControlMath::addIfNotNanVector3f(_acc_sp, acc_sp_velocity);
 ```
 
 - ゲイン: `MPC_XY_VEL_P_ACC` / `_I_ACC` / `_D_ACC`、`MPC_Z_VEL_P_ACC` / `_I_ACC` / `_D_ACC`
-- **D 項は速度誤差の微分ではなく、推定加速度 `_vel_dot` を直接使う**
-  （微分ノイズを避けるため。`vehicle_local_position` の `ax/ay/az`）
+- **D 項は速度誤差の微分ではなく、加速度 `_vel_dot` を使う**
+  （設定値が変化した瞬間の微分キックを避けるため）
 - 出力の単位は **加速度 [m/s²]**（PX4 では加速度が制御の共通通貨）
+
+##### `_vel_dot` はどこから来るのか
+
+ここは誤解しやすい箇所です。`_vel_dot` は
+**`vehicle_local_position` の `ax/ay/az` ではありません**。
+`mc_pos_control` はそのフィールドを一切読んでおらず、
+**自分でフィルタ済み速度を微分して作っています**。
+
+`MulticopterPositionControl::set_vehicle_states()`
+（`src/modules/mc_pos_control/MulticopterPositionControl.cpp`）:
+
+```cpp
+const Vector2f vel_xy_prev = _vel_xy_lp_filter.getState();
+
+// 速度: ノッチフィルタ → ローパスフィルタ
+states.velocity.xy() = _vel_xy_lp_filter.update(_vel_xy_notch_filter.apply(velocity_xy));
+
+// 加速度: 上のフィルタ済み速度を差分し、さらにローパス
+states.acceleration.xy() = _vel_deriv_xy_lp_filter.update((_vel_xy_lp_filter.getState() - vel_xy_prev) / dt_s);
+```
+
+`PositionControl::setState()` がこれを受け取ります
+（`_vel = states.velocity`、`_vel_dot = states.acceleration`）。
+
+したがって位置制御が使う信号の流れはこうなります:
+
+```
+vehicle_local_position
+  ├─ x / y / z        ──────────────────────────────→ _pos      （位置 P 制御）
+  ├─ vx / vy / vz  ─┬─ ノッチ → LPF ────────────────→ _vel      （速度 P・I 項）
+  │                 └─ 差分 / dt → LPF ─────────────→ _vel_dot  （速度 D 項）
+  └─ ax / ay / az     ── mc_pos_control は使わない
+```
+
+フィルタのパラメータ:
+
+| パラメータ | 既定値 | 役割 |
+| --- | --- | --- |
+| `MPC_VEL_NF_FRQ` | 0 Hz（無効） | 速度のノッチフィルタ中心周波数 |
+| `MPC_VEL_NF_BW` | 5 Hz | 同ノッチの帯域幅 |
+| `MPC_VEL_LP` | 0 Hz（無効） | 速度のローパス遮断周波数 |
+| `MPC_VELD_LP` | **5 Hz（有効）** | **速度微分のローパス遮断周波数（D 項のノイズ対策）** |
+
+> [!IMPORTANT]
+> **要点は「微分を避ける」ではなく「微分を 1 段に留めてフィルタする」です。**
+>
+> - **位置 → 速度** の微分は **しません**。EKF2 が速度を独立した状態量として
+>   観測融合で推定しています（[03 章](03_sensing_estimation.md#状態ベクトル)）。
+>   位置を数値微分するとノイズが増幅されるためです。
+> - **速度 → 加速度** の微分は **します**。ただしノッチとローパスを前後に挟みます。
+>
+> 速度推定が無効になったとき（`v_xy_valid` が false）は
+> **フィルタもリセット**されます。そうしないと速度が復帰した瞬間に
+> 差分が巨大になり、D 項が加速度スパイクを生むためです。
 
 #### (3) 加速度 → 推力ベクトル → 姿勢 — `_accelerationControl()`
 
@@ -415,6 +485,20 @@ Vector3f torque = _gain_p.emult(rate_error)          // P
 - **D 項は角速度誤差の微分ではなく、`vehicle_angular_velocity.xyz_derivative`（角加速度）を使う**
   → 設定値変化による微分キック（derivative kick）が起きない
 - 出力は **正規化トルク [-1, 1]**
+
+> [!NOTE]
+> **位置ループとの対比 — D 項の作り方が 2 段で違います。**
+>
+> | | D 項の入力 | 誰が微分するか |
+> | --- | --- | --- |
+> | 位置ループ（`mc_pos_control`） | 速度の微分 | **制御器が自分で**（`set_vehicle_states()`） |
+> | 角速度ループ（`mc_rate_control`） | `vehicle_angular_velocity.xyz_derivative` | **`sensors` 側が済ませている** |
+>
+> 角速度側は上流の `VehicleAngularVelocity`
+> （`src/modules/sensors/vehicle_angular_velocity/`）が
+> ノッチ・ローパスをかけた上で角加速度まで算出し、トピックに載せて配ります。
+> ジャイロは 1 kHz 級で届くので、フィルタ処理を上流に一箇所へ集めたほうが
+> 合理的だからです。位置ループ側は 50 Hz なので制御器内で完結させています。
 
 ### ゲインの構成
 
