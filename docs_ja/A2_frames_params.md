@@ -129,9 +129,16 @@ uint8 velocity_frame
 
 ### 接頭辞の意味
 
+> [!WARNING]
+> **`MPC_` は Model Predictive Control ではありません。**
+> **Multicopter Position Control** の略で、実装は PID カスケードです
+> （[04 章](04_control_cascade.md)）。
+> MPC を PX4 に載せる話をしているときに `MPC_*` パラメータを
+> 「MPC のチューニング用」と取り違えると噛み合わなくなります。
+
 | 接頭辞 | 担当 | 定義場所 |
 | --- | --- | --- |
-| `MPC_` | マルチコプター位置制御 | `src/modules/mc_pos_control/*.yaml` |
+| `MPC_` | マルチコプター位置制御（**Multicopter Position Control**） | `src/modules/mc_pos_control/*.yaml` |
 | `MC_` | マルチコプター姿勢・角速度制御 | `src/modules/mc_att_control/`, `mc_rate_control/` |
 | `CA_` | 推力配分（機体形状） | `src/modules/control_allocator/module.yaml` |
 | `EKF2_` | 状態推定 | `src/modules/ekf2/params_*.yaml` |
@@ -268,7 +275,7 @@ uint8 velocity_frame
 
 | パラメータ | 意味 |
 | --- | --- |
-| `IMU_GYRO_RATEMAX` | ジャイロの発行レート上限（= 角速度制御の周期） |
+| `IMU_GYRO_RATEMAX` | **内側ループレートそのもの**（既定 400 Hz）。ジャイロの発行レート上限 = 角速度制御の周期 |
 | `IMU_GYRO_CUTOFF` | ジャイロのローパス周波数 |
 | `IMU_DGYRO_CUTOFF` | 角加速度（D 項用）のローパス周波数 |
 | `IMU_GYRO_NF0_FRQ` / `_BW` | 静的ノッチフィルタ |

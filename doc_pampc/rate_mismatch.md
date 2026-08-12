@@ -240,7 +240,7 @@ IMU_GYRO_RATEMAX:
 | 姿勢制御 | 200 Hz | `IMU_INTEG_RATE` |
 | 位置制御 | ~100 Hz | `EKF2_PREDICT_US` |
 
-詳細は `doc_jp/control_cascade.md` を参照。
+詳細は `docs_ja/04_control_cascade.md` を参照。
 
 ---
 
@@ -576,5 +576,5 @@ RTI は 1 反復しか回さないので、想像より遥かに軽い。
 - [uzh-rpg/rpg_mpc](https://github.com/uzh-rpg/rpg_mpc) — 実装 (ACADO + qpOASES)
 - [Thrust Mixing, Saturation, and Body-Rate Control for Accurate Aggressive Quadrotor Flight](https://rpg.ifi.uzh.ch/docs/RAL17_Faessler.pdf) — Faessler, Falanga, Scaramuzza, RA-L 2017
 - [uzh-rpg/rpg_quadrotor_control Wiki](https://github.com/uzh-rpg/rpg_quadrotor_control/wiki/Overview-and-Concepts)
-- `doc_jp/control_cascade.md` — PX4 制御カスケードの詳細
+- `docs_ja/04_control_cascade.md` — PX4 制御カスケードの詳細（全体解説は `docs_ja/README.md`）
 - `doc_pampc/integration_guide.md` — 実装手順

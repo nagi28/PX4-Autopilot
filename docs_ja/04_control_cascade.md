@@ -69,7 +69,7 @@
 | --- | --- | --- | --- | --- |
 | ① | `mc_pos_control` | `vehicle_local_position` | 50 Hz | どこへ行くか → どう傾くか |
 | ② | `mc_att_control` | `vehicle_attitude` | 250 Hz | どう傾くか → どう回るか |
-| ③ | `mc_rate_control` | `vehicle_angular_velocity` | 250〜1000 Hz | どう回るか → どんな力／トルクか |
+| ③ | `mc_rate_control` | `vehicle_angular_velocity` | **既定 400 Hz**（`IMU_GYRO_RATEMAX`） | どう回るか → どんな力／トルクか |
 | ④ | `control_allocator` | `vehicle_torque_setpoint` | ③ と同じ | 力／トルク → 各モータ出力 |
 
 **上の段ほど遅く、下の段ほど速い。** これがカスケード制御の基本です。
@@ -492,6 +492,75 @@ Vector3f torque = _gain_p.emult(rate_error)          // P
 - **D 項は角速度誤差の微分ではなく、`vehicle_angular_velocity.xyz_derivative`（角加速度）を使う**
   → 設定値変化による微分キック（derivative kick）が起きない
 - 出力は **正規化トルク [-1, 1]**
+
+### 角速度設定値はラッチされる
+
+**★ 角速度レベルで外部から注入するなら、この節は必読です。**
+
+**内側ループのレートは `IMU_GYRO_RATEMAX`（既定 400 Hz）が決めます。**
+これは「制御用ジャイロの発行レート上限」であり、`mc_rate_control` は
+`vehicle_angular_velocity` のコールバックで駆動されるので、**そのまま内側ループレートです**。
+
+重要なのは、**設定値の到着レートは内側ループのレートに影響しない**という点です。
+
+```cpp
+} else if (_vehicle_rates_setpoint_sub.update(&vehicle_rates_setpoint)) {
+    _rates_setpoint(0) = PX4_ISFINITE(vehicle_rates_setpoint.roll)  ? vehicle_rates_setpoint.roll  : rates(0);
+    /* ... */
+}
+
+// ↓ setpoint が更新されたかに関係なく、毎ジャイロサンプル走る
+if (_vehicle_control_mode.flag_control_rates_enabled) {
+    Vector3f torque_setpoint =
+        _rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
+```
+
+`update()` は **新しいサンプルが届いたときだけ true** を返し、
+`_rates_setpoint` / `_thrust_setpoint` は **クラスメンバ**です。
+ヘッダにも意図が明記されています（`MulticopterRateControl.hpp`）:
+
+```cpp
+// keep setpoint values between updates
+matrix::Vector3f _acro_rate_max;
+matrix::Vector3f _rates_setpoint{};
+
+float _battery_status_scale{0.0f};
+matrix::Vector3f _thrust_setpoint{};
+```
+
+**つまり角速度設定値はゼロ次ホールド（ZOH）されます。**
+外部から 10 Hz で送っても、レート PID は最新の実測角速度に対して 400 Hz で回り続けます。
+これはカスケード制御の設計意図そのもので、
+**外側ループが遅くても内側ループの帯域は落ちません**。
+
+NaN 軸の扱いも同じコードに現れています。
+`PX4_ISFINITE(...) ? ... : rates(n)` — **NaN の軸には現在の実測角速度が代入され**、
+結果その軸の誤差がゼロになって制御されません。エラーではなく
+[NaN イディオム](#nan-イディオム)どおりの正常な入力です。
+
+> [!WARNING]
+> **`vehicle_rates_setpoint` に陳腐化チェックはありません。**
+> `src/` 全体で、このトピックの `timestamp` を検査して古さを判定しているコードは
+> 一箇所もありません（`timestamp` への書き込みは publisher 側だけ）。
+>
+> つまり **外部の publisher が死んでも、レート制御器は最後に受け取った
+> 角速度と推力を無限に保持し続けます**。ラッチは上で見たとおり仕様です。
+>
+> 唯一の保護は commander 側の Offboard フェイルセーフですが、
+> あれが見ているのは `offboard_control_mode` という**別のトピック**です
+> （[07 章](07_route_offboard.md)、`COM_OF_LOSS_T`）。
+> `vehicle_rates_setpoint` だけを送り続けて `offboard_control_mode` を止めると
+> フェイルセーフが働きますが、逆に両方を送り続けたまま
+> **中身が更新されなくなった場合は誰も気づきません**。
+>
+> 対比として、RC 入力には同じ危険への警告が明記されています
+> （`src/modules/commander/commander_params.yaml` の `COM_RC_LOSS_T`）:
+>
+> > This must be kept short as the vehicle will use the last supplied setpoint
+> > until the timeout triggers.
+>
+> 角速度設定値には同等の記述も仕組みもありません。
+> **角速度レベルで注入するなら、外部側で watchdog を実装してください。**
 
 > [!NOTE]
 > **位置ループとの対比 — D 項の作り方が 2 段で違います。**

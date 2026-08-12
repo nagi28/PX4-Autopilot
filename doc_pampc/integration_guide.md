@@ -4,7 +4,7 @@
 $\mathbf{u} = [c, \mathbf{\Omega}_B]$ を、PX4 の offboard モードに流し込むための手順書。
 
 レート整合性に関する理論的な議論は `doc_pampc/rate_mismatch.md` を参照。
-PX4 側の制御構造は `doc_jp/control_cascade.md` を参照。
+PX4 側の制御構造は `docs_ja/04_control_cascade.md` を参照。
 
 ---
 
@@ -263,7 +263,7 @@ nsh> uorb top vehicle_rates_setpoint vehicle_angular_velocity
 **PX4 には `vehicle_rates_setpoint` の timeout が存在しない。**
 
 `mc_rate_control` は最後に受け取った角速度と推力を 400 Hz で出し続ける
-(`doc_jp/control_cascade.md` §4.4 参照)。
+(`docs_ja/04_control_cascade.md` の「角速度設定値はラッチされる」節を参照)。
 
 そして failsafe は**別トピック** `offboard_control_mode` を見ている
 (`src/modules/commander/HealthAndArmingChecks/checks/offboardCheck.cpp:47-50`)。
@@ -409,7 +409,7 @@ false ならモータが飽和していて、指令どおりのトルクが出�
 ## 参考
 
 - `doc_pampc/rate_mismatch.md` — レート整合性の理論的背景
-- `doc_jp/control_cascade.md` — PX4 制御カスケードの詳細
+- `docs_ja/04_control_cascade.md` — PX4 制御カスケードの詳細（全体解説は `docs_ja/README.md`）
 - `docs/en/flight_modes/offboard.md` — offboard モードの公式仕様
 - `docs/en/ros2/offboard_control.md` — ROS 2 offboard の実装例
 - `src/modules/mc_raptor/README.md` — 外部制御器を接続した実例 (SITL 設定が参考になる)
