@@ -215,6 +215,10 @@ uint8 velocity_frame
 | パラメータ | 意味 |
 | --- | --- |
 | `EKF2_EN` | EKF2 を有効化 |
+| `EKF2_PREDICT_US` | **EKF コアの融合周期** [µs]（既定 10000 = 100 Hz） |
+| `EKF2_DELAY_MAX` | **遅延バッファ長 = 許容する最大センサ遅延** [ms]（既定 200） |
+| `EKF2_IMU_CTRL` | IMU のどの補正を有効にするか（ビットマスク） |
+| `EKF2_BARO_DELAY` / `EKF2_MAG_DELAY` / `EKF2_RNG_DELAY` / `EKF2_OF_DELAY` / `EKF2_ASP_DELAY` | 各センサの遅延申告 [ms]（GNSS は受信機のタイムスタンプを使うため専用パラメータなし） |
 | `EKF2_HGT_REF` | **高度の基準センサ**（気圧 / GNSS / 距離計 / 外部Vision） |
 | `EKF2_GPS_CTRL` | GNSS の使い方（ビットマスク） |
 | `EKF2_BARO_CTRL` | 気圧の使い方 |

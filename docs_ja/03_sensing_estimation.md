@@ -42,7 +42,11 @@
 ┌──────────────────────────────────────────────┐
 │ ekf2 (src/modules/ekf2/)                      │
 │  24 誤差状態の拡張カルマンフィルタ               │
-│  IMU で予測 → 各種センサで補正                  │
+│                                               │
+│  ・EKF コア: Δθ/Δv で予測 → 各センサで補正       │
+│    ただし融合するのは「過去の時刻」（遅延補償）      │
+│  ・出力予測器: そこから現在時刻まで IMU で外挿      │
+│    → 2 段構造。詳細は 3.4 節                     │
 │                                               │
 │  vehicle_attitude        ← ★ 姿勢（クォータニオン）│
 │  vehicle_local_position  ← ★ ローカル NED 位置速度 │
@@ -59,9 +63,77 @@
 `vehicle_attitude` / `vehicle_local_position`（姿勢・位置制御用）の 3 つです。
 生センサ値（`sensor_gyro` など）は制御には使いません。
 
+> [!NOTE]
+> **この章で押さえるべき 3 点**（いずれも誤解が多い箇所です）:
+>
+> 1. **加速度計は「加速度」ではなく比力を測る**（重力込み）→ [3.2](#32-生センサは何を測っているのか)
+> 2. **センサ → 状態の向きは微分ではなく積分**（二重積分の誤差を観測で押さえる）→ [3.4](#向きは積分-微分ではない)
+> 3. **EKF2 は加速度を状態として推定していない**。`ax/ay/az` は生値の加工 → [3.4](#3-つの出力の出自は違う)
+
 ---
 
-## 3.2 `sensors` モジュールの仕事
+## 3.2 生センサは何を測っているのか
+
+**ここを誤解すると EKF2 の設計が理解できません。** 特に加速度計です。
+
+| センサ | **実際に測っている量** | `sensors` が EKF に渡す形 | 注意点 |
+| --- | --- | --- | --- |
+| ジャイロ | 角速度 [rad/s] | **`delta_angle`**（Δθ, 積分増分） | バイアスがドリフトする |
+| 加速度計 | **比力**（specific force）[m/s²] | **`delta_velocity`**（Δv, 積分増分） | **重力を含む。位置の 2 階微分ではない** |
+| GNSS | **位置 と 速度の両方** | `vehicle_gps_position` | 遅延が大きい（100〜200 ms） |
+| 気圧計 | 気圧 → 高度 | `vehicle_air_data` | 絶対値は不正確、相対変化は速い |
+| 磁気計 | 磁場ベクトル → 方位 | `vehicle_magnetometer` | 機体の電流・鉄材で汚染される |
+| 距離計 / フロー | 対地高度 / 対地速度 | `distance_sensor` / `vehicle_optical_flow` | 屋内・低高度用 |
+
+### 加速度計は「加速度」を測っていない ★
+
+加速度計が測るのは **比力（proper acceleration）** です。
+
+- **静止しているとき** → 上向きに **1 g** を示す（重力に抗して支えられているため）
+- **自由落下しているとき** → **0** を示す（何にも支えられていないため）
+
+つまり「機体が動いた量」ではなく「機体が重力以外から受けた力」を測っています。
+だから EKF は **重力を明示的に足し戻す**必要があります
+（`src/modules/ekf2/EKF/output_predictor/output_predictor.cpp`）:
+
+```cpp
+// バイアスを引いた Δv を、姿勢を使って機体座標 → NED へ回転
+Vector3f delta_vel_earth{_R_to_earth_now * delta_velocity_corrected};
+
+// 加速度計は重力を含んで測るので、重力分を補正する
+delta_vel_earth(2) += _gravity * delta_velocity_dt;
+```
+
+この 1 行がないと、静止していても「上向き 1 g で加速している」と解釈され、
+速度と位置が際限なく発散します。
+
+### なぜ「増分（Δθ, Δv）」で渡すのか
+
+`sensors` モジュールが EKF に渡すのは瞬時値ではなく **積分増分**です
+（`msg/VehicleImu.msg`）:
+
+```
+float32[3] delta_angle          # 積分期間中の Δθ [rad]（機体 FRD）
+float32[3] delta_velocity       # 積分期間中の Δv [m/s]（機体 FRD）
+uint32 delta_angle_dt           # 積分期間 [µs]
+uint32 delta_velocity_dt        # 積分期間 [µs]
+```
+
+**ストラップダウン INS の標準的な形式**です。理由は 2 つあります。
+
+1. **情報を捨てない** — IMU は 1 kHz で読めますが EKF は 100 Hz で回ります。
+   単純に間引くと間のサンプルが失われますが、積分してから渡せば
+   その期間の運動が全部含まれます（`Integrator` クラス、`src/modules/sensors/Integrator.hpp`）
+2. **積分がそのまま状態更新になる** — EKF 側は Δθ / Δv を足し込むだけで済みます
+
+> [!NOTE]
+> **`vehicle_imu`（Δθ / Δv）と `vehicle_angular_velocity`（角速度 / 角加速度）は別物です。**
+> 前者は EKF2 への入力、後者は角速度制御への入力です。
+> 同じジャイロから作られますが、用途が違うのでフィルタ処理も別々です。
+
+---
+
+## 3.3 `sensors` モジュールの仕事
 
 `src/modules/sensors/` は「生センサ → 制御が使える形」への橋渡しをします。
 
@@ -113,7 +185,7 @@ listener vehicle_imu_status -i 0
 
 ---
 
-## 3.3 EKF2 — 状態推定の中核
+## 3.4 EKF2 — 状態推定の中核
 
 `src/modules/ekf2/` が PX4 の標準推定器です。
 `EKF2.cpp` が uORB との入出力を担当し、`EKF/` 配下がフィルタ本体です。
@@ -154,29 +226,197 @@ listener vehicle_imu_status -i 0
 > これが位置制御で速度 PID を主役にできる理由です
 > （[04 章](04_control_cascade.md#_vel_dot-はどこから来るのか)）。
 
-### 予測と補正
+### 向きは「積分」— 微分ではない
+
+センサから状態を作る向きを間違えないでください。**積分**です。
 
 ```
-   IMU (vehicle_imu の Δθ, Δv)
-        │
-        ▼
-   [ 予測 ] 状態を積分し、共分散を伝播      ← 高レート（200〜1000 Hz）
-        │
-        ▼
-   [ 補正 ] 各センサの観測で状態を更新       ← センサごとに異なるレート
-        │        GNSS / 気圧 / 磁気 / 距離計 / フロー / 外部Vision / 対気速度 …
-        ▼
-   [ 出力予測器 ] 遅延補償して現在時刻の値を出す
-        │
-        ▼
-   vehicle_attitude / vehicle_local_position / vehicle_global_position
+   Δθ（ジャイロ）──────────────────────────積分──→ 姿勢
+                                                    │
+                                                    │ この姿勢で回転させる
+                                                    ▼
+   Δv（加速度計）──[機体→NED へ回転]──[重力を足し戻す]──積分──→ 速度 ──積分──→ 位置
 ```
 
-**遅延補償**が PX4 EKF2 の特徴です。
-GNSS のような遅延の大きいセンサに合わせて融合時刻を過去にずらし、
-`output_predictor`（`src/modules/ekf2/EKF/output_predictor/`）が
-「今この瞬間」の値を高レートで外挿します。
-だから制御は遅延の小さい `vehicle_attitude` を使えます。
+`OutputPredictor::calculateOutputStates()` の実装がそのままこの順序です:
+
+```cpp
+// ① バイアスを引いた Δθ で姿勢を進める
+const Quatf dq(AxisAnglef{delta_angle_corrected});
+_output_new.quat_nominal = _output_new.quat_nominal * dq;
+_output_new.quat_nominal.normalize();
+
+// ② その姿勢で Δv を NED へ回転し、重力を補正する
+_R_to_earth_now = Dcmf(_output_new.quat_nominal);
+Vector3f delta_vel_earth{_R_to_earth_now * delta_velocity_corrected};
+delta_vel_earth(2) += _gravity * delta_velocity_dt;
+
+// ③ 速度に足し込む
+const Vector3f vel_last(_output_new.vel);
+_output_new.vel += delta_vel_earth;
+
+// ④ 台形積分で位置に足し込む
+const Vector3f delta_pos_NED = (_output_new.vel + vel_last) * (delta_velocity_dt * 0.5f);
+_output_new.pos += delta_pos_NED;
+```
+
+**加速度 → 速度 → 位置 の二重積分**なので、
+加速度計のわずかなバイアスやノイズが時間とともに二乗で溜まります。
+数秒で数メートル、数十秒で数十メートルずれます。
+**この累積誤差を押さえ込むのがカルマン更新（補正）の役割**です。
+
+| 誤差の抑え込み | 使う観測 |
+| --- | --- |
+| 位置のドリフト | GNSS 位置、外部Vision 位置、距離計（高度） |
+| 速度のドリフト | **GNSS 速度**、オプティカルフロー、対気速度 |
+| 姿勢の傾き誤差 | 加速度計（長期的には重力方向を示すため） |
+| 方位のドリフト | 磁気計、GNSS の進行方向 |
+| バイアスそのもの | 上記すべて（バイアスも状態なので同時に推定される） |
+
+> [!IMPORTANT]
+> **「位置を微分して速度を作る」処理は PX4 のどこにも存在しません。**
+> 速度は加速度の積分（予測）と GNSS 速度などの観測（補正）から作られます。
+> だから位置よりも滑らかで、位置制御で速度 PID を主役にできます
+> （[04 章](04_control_cascade.md#_vel_dot-はどこから来るのか)）。
+
+### 2 段構造 — EKF コアと出力予測器は並列に走る
+
+EKF2 で最も特徴的な設計です。**直列のパイプラインではありません。**
+
+```
+        vehicle_imu（Δθ, Δv）    〜1 kHz
+                 │
+        ┌────────┴─────────────────────────────────┐
+        │                                          │
+        ▼ 毎サンプル、常に走る                        ▼ ダウンサンプルして貯める
+┌──────────────────────────┐        ┌──────────────────────────────┐
+│ 出力予測器                 │        │ IMU ダウンサンプラ + 遅延バッファ  │
+│ OutputPredictor           │        │ バッファ長 = EKF2_DELAY_MAX     │
+│                           │        │            （既定 200 ms）      │
+│ Δθ/Δv を「現在時刻」まで    │        └──────────────┬───────────────┘
+│ ひたすら積分する            │                       │ 最古のサンプルを取り出す
+│ （カルマン更新はしない）      │                       ▼
+│                           │        ┌──────────────────────────────┐
+│                           │        │ EKF コア（融合時刻＝過去）        │
+│      引き戻される  ◄───────┼────────┤ EKF2_PREDICT_US 周期（既定 100 Hz）│
+│  correctOutputStates()    │        │                              │
+│                           │        │ 予測 + カルマン更新             │
+│                           │        │ GNSS/気圧/磁気/フロー/外部Vision │
+└─────────┬─────────────────┘        │ を「観測が行われた過去の時刻」で融合│
+          │                          └──────────────────────────────┘
+          ▼ ★ publish されるのはこちら
+  vehicle_attitude / vehicle_local_position / vehicle_global_position
+```
+
+`EstimatorInterface::setIMUData()`（`src/modules/ekf2/EKF/estimator_interface.cpp`）が
+この分岐そのものです:
+
+```cpp
+// the output observer always runs        ← 毎 IMU サンプル
+_output_predictor.calculateOutputStates(imu_sample.time_us, imu_sample.delta_ang,
+                                        imu_sample.delta_ang_dt,
+                                        imu_sample.delta_vel, imu_sample.delta_vel_dt);
+
+// ダウンサンプルが溜まったときだけバッファに積む
+if (_imu_down_sampler.update(imu_sample)) {
+    _imu_buffer.push(imu_downsampled);
+    // 融合時刻 = バッファの「最古」= 過去の時刻
+    _time_delayed_us = _imu_buffer.get_oldest().time_us;
+}
+```
+
+#### なぜ 2 段に分けるのか
+
+**GNSS は 100〜200 ms 遅れて届きます。** それを「今の観測」として融合すると、
+過去の位置を現在の位置だと思い込んで推定が歪みます。
+
+そこで:
+
+1. **EKF コアは過去（融合時刻）で融合する** — 観測が実際に行われた時刻に合わせるので、
+   遅延による歪みが出ない。ただし出てくる推定値は 200 ms 前のもの
+2. **出力予測器が過去から現在まで IMU だけで外挿する** — カルマン更新はせず積分だけ。
+   遅延ゼロで現在時刻の値が得られる
+
+**制御が低遅延の姿勢・位置を使えるのはこの構造のおかげです。**
+
+#### 2 つの整合を取る仕組み
+
+出力予測器は積分しかしないので、放っておくとコアの推定からずれていきます。
+`OutputPredictor::correctOutputStates()` が **相補フィルタ**で引き戻します:
+
+```cpp
+// コアの状態と、出力予測器の「同じ過去時刻での値」を比較する
+const Vector3f vel_err(vel_state - output_delayed.vel);
+const Vector3f pos_err(pos_state - output_delayed.pos);
+
+_output_tracking_error(1) = vel_err.norm();
+_output_tracking_error(2) = pos_err.norm();
+
+// 比例 + 積分ゲインで補正量を作り、バッファ全体に適用する
+_vel_err_integ += vel_err;
+const Vector3f vel_correction = vel_err * vel_gain + _vel_err_integ * sq(vel_gain) * 0.1f;
+
+_pos_err_integ += pos_err;
+const Vector3f pos_correction = pos_err * pos_gain + _pos_err_integ * sq(pos_gain) * 0.1f;
+```
+
+追従できているかは `estimator_status.output_tracking_error`
+（角度 [rad] / 速度 [m/s] / 位置 [m] の 3 要素）で確認できます。
+
+| パラメータ | 既定値 | 意味 |
+| --- | --- | --- |
+| `EKF2_PREDICT_US` | 10000 µs（= 100 Hz） | **EKF コアの融合周期** |
+| `EKF2_DELAY_MAX` | 200 ms | **遅延バッファ長 = 許容する最大センサ遅延** |
+| `EKF2_IMU_CTRL` | — | IMU のどの補正を有効にするか |
+
+> [!TIP]
+> **`EKF2_DELAY_MAX` を必要以上に大きくしないでください。**
+> バッファが長いほど RAM を食い、コアの推定が古くなります。
+> 逆に、使っているセンサの遅延より小さいと、
+> その観測はバッファから溢れて融合されません。
+>
+> センサごとの遅延はそれぞれのパラメータで申告します:
+> `EKF2_BARO_DELAY`（気圧）, `EKF2_MAG_DELAY`（磁気）, `EKF2_RNG_DELAY`（距離計）,
+> `EKF2_OF_DELAY`（フロー）, `EKF2_EV_DELAY`（外部Vision）, `EKF2_ASP_DELAY`（対気速度）。
+> **GNSS には専用の遅延パラメータがありません** — 受信機が観測時刻を
+> メッセージに載せてくるため、EKF はそのタイムスタンプを直接使います。
+
+### 3 つの出力の出自は違う
+
+`vehicle_local_position` の位置・速度・加速度は **同じ由来ではありません。**
+
+| 出力 | 出自 | カルマン状態か |
+| --- | --- | --- |
+| `x/y/z`（位置） | 状態 `pos` を出力予測器が現在時刻へ外挿 | **○ 状態** |
+| `vx/vy/vz`（速度） | 状態 `vel` を同様に外挿 | **○ 状態** |
+| `ax/ay/az`（加速度） | **加速度計 Δv のバイアス補正・NED 回転・重力除去・平均** | **× 状態ではない** |
+
+加速度の出所を追うと `EKF2.cpp` → `estimator_interface.h` → `output_predictor.cpp` で、
+最終的にこうなっています:
+
+```cpp
+// src/modules/ekf2/EKF/output_predictor/output_predictor.cpp
+matrix::Vector3f OutputPredictor::getVelocityDerivative() const
+{
+    if (_delta_vel_dt > FLT_EPSILON) {
+        return _delta_vel_sum / _delta_vel_dt;   // 積算した Δv を時間で割るだけ
+    } else {
+        return matrix::Vector3f(0.f, 0.f, 0.f);
+    }
+}
+```
+
+`_delta_vel_sum` は上で見た `delta_vel_earth`（バイアス補正 → NED 回転 → 重力除去済み）を
+そのまま足し込んだもの。**カルマンフィルタを一度も通っていません。**
+
+> [!IMPORTANT]
+> **EKF2 は加速度を推定していません。** 24 誤差状態に加速度は含まれず、
+> `ax/ay/az` は「フィルタされていない、ほぼ生の平均加速度」です。
+>
+> だから位置制御はこのフィールドを使わず、
+> **自分でフィルタ済み速度を微分して D 項を作ります**
+> （[04 章](04_control_cascade.md#_vel_dot-はどこから来るのか)）。
+> 生の加速度をそのまま D 項に入れるとノイズで制御が荒れるためです。
 
 ### 補正源（aid sources）
 
@@ -211,7 +451,7 @@ GNSS のような遅延の大きいセンサに合わせて融合時刻を過去
 
 ---
 
-## 3.4 外部の推定値を PX4 に入れる ★ 自律制御で最重要
+## 3.5 外部の推定値を PX4 に入れる ★ 自律制御で最重要
 
 GPS の効かない屋内や、SLAM・モーションキャプチャを使う場合、
 **外部で計算した位置・姿勢を EKF2 に流し込む**ことができます。
@@ -265,7 +505,7 @@ EKF2 が「過去の観測を現在の観測として」融合してしまい、
 
 ---
 
-## 3.5 推定の健全性を確認する
+## 3.6 推定の健全性を確認する
 
 自律制御では「推定が信用できるか」の判定が安全に直結します。
 
@@ -314,9 +554,29 @@ listener estimator_sensor_bias     # 推定されたバイアス
 これが大きいまま続くなら、センサかモデルのどちらかが間違っています。
 `estimator_status` の `*_test_ratio` が 1.0 を超えるとそのセンサは棄却されます。
 
+### 出力予測器の追従誤差
+
+`estimator_status.output_tracking_error` は **出力予測器が EKF コアに追従できているか**を
+示す 3 要素の配列です（[2 段構造](#2-段構造--ekf-コアと出力予測器は並列に走る)参照）。
+
+| 要素 | 内容 | 単位 |
+| --- | --- | --- |
+| `[0]` | 姿勢の追従誤差 | rad |
+| `[1]` | 速度の追従誤差 | m/s |
+| `[2]` | 位置の追従誤差 | m |
+
+平常時は小さい値で安定します。**継続的に大きい場合**は、
+コアの推定と IMU 積分が食い違っている — つまり
+IMU のバイアスやスケール誤差、あるいは `EKF2_PREDICT_US` と IMU レートの
+不整合を疑ってください。
+
+```sh
+listener estimator_status
+```
+
 ---
 
-## 3.6 代替の推定器
+## 3.7 代替の推定器
 
 | モジュール | 用途 |
 | --- | --- |
@@ -333,7 +593,7 @@ listener estimator_sensor_bias     # 推定されたバイアス
 
 ---
 
-## 3.7 この章のまとめ
+## 3.8 この章のまとめ
 
 - **生センサ → `sensors` モジュール → EKF2 → 制御用トピック** の 3 段構成
 - 制御が使うのは `vehicle_angular_velocity` / `vehicle_attitude` / `vehicle_local_position`

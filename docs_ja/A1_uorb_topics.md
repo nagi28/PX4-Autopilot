@@ -23,7 +23,7 @@
 | `vehicle_odometry` | `versioned/` | `ekf2` | 位置・姿勢・速度をまとめたオドメトリ | out |
 | `vehicle_angular_velocity` | `versioned/` | `sensors` | **制御用角速度（フィルタ済）+ 角加速度** | (コメントアウト) |
 | `vehicle_acceleration` | `msg/` | `sensors` | 制御用加速度 | – |
-| `vehicle_imu` | `msg/` | `sensors` | IMU 積分値（Δθ, Δv） | – |
+| `vehicle_imu` | `msg/` | `sensors` | **EKF2 への入力**。瞬時値ではなく積分増分（Δθ, Δv）＋各積分期間 | – |
 | `sensor_combined` | `msg/` | `sensors` | 生ジャイロ・加速度（ログ／互換用） | out |
 | `vehicle_air_data` | `msg/` | `sensors` | 気圧高度・温度 | – |
 | `vehicle_magnetometer` | `msg/` | `sensors` | 磁気 | – |
@@ -62,11 +62,20 @@ ref_lat, ref_lon, ref_alt        ローカル原点の緯度経度高度
 > 位置制御は位置だけでなく速度もフィードバックしており、
 > 実際には速度 PID が主役です。
 >
-> ただし **`ax/ay/az` は `mc_pos_control` が読んでいません**。
+> ただし **`ax/ay/az` は EKF の推定状態ではありません。**
+> 24 誤差状態に加速度は含まれず、この値は
+> 「加速度計の Δv をバイアス補正 → NED 回転 → 重力除去 → 平均化」しただけの
+> **フィルタを通っていない生値の加工**です
+> （`OutputPredictor::getVelocityDerivative()`。[03 章](03_sensing_estimation.md#3-つの出力の出自は違う)）。
+>
+> そのため **`mc_pos_control` はこのフィールドを読んでいません**。
 > 位置制御の D 項に使う加速度は、制御器が
 > 「フィルタ済み速度を自分で微分する」形で作っています
 > （[04 章](04_control_cascade.md#_vel_dot-はどこから来るのか)）。
 > `ax/ay/az` の主な用途はログと他モジュールでの参照です。
+>
+> 一方 **`x/y/z` と `vx/vy/vz` は正真正銘のカルマン推定状態**（`pos` / `vel`）で、
+> 出力予測器が現在時刻へ外挿したものです。
 
 ---
 
