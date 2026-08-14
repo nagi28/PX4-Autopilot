@@ -562,6 +562,55 @@ NaN 軸の扱いも同じコードに現れています。
 > 角速度設定値には同等の記述も仕組みもありません。
 > **角速度レベルで注入するなら、外部側で watchdog を実装してください。**
 
+#### ラッチは角速度に限った性質 — 推力配分は自走しない
+
+**「設定値を止めても下流が回り続ける」のは角速度ループの話です。**
+一段下の `control_allocator` は挙動が違うので、混同しないでください。
+
+`_torque_sp` / `_thrust_sp` は `ControlAllocator` のクラスメンバなので値自体は保持されますが、
+**配分の実行が `vehicle_torque_setpoint` の新着で駆動されます**
+（`src/modules/control_allocator/ControlAllocator.cpp`）:
+
+```cpp
+bool do_update = false;
+
+// Run allocator on torque changes
+if (_vehicle_torque_setpoint_sub.update(&vehicle_torque_setpoint)) {
+    _torque_sp = matrix::Vector3f(vehicle_torque_setpoint.xyz);
+    do_update = true;                                    // ← ここだけが true にする
+    _timestamp_sample = vehicle_torque_setpoint.timestamp_sample;
+}
+
+if (_vehicle_thrust_setpoint_sub.update(&vehicle_thrust_setpoint)) {
+    _thrust_sp = matrix::Vector3f(vehicle_thrust_setpoint.xyz);   // 推力だけでは駆動しない
+    /* ... */
+}
+
+if (do_update) {
+    _last_run = now;
+    /* 効果行列の更新 → 配分 → actuator_motors の publish */
+}
+```
+
+`init()` で `_vehicle_torque_setpoint_sub.registerCallback()` しているのもこれと対応します。
+`Run()` の冒頭にある `ScheduleDelayed(50_ms)` は**バックアップスケジュールの再武装**で、
+`do_update` が false なら配分は走りません
+（`ENABLE_LOCKSTEP_SCHEDULER` 時は lockstep と干渉するため無効化されます）。
+
+| 注入先 | 下流は自走するか | 送信レートの意味 |
+| --- | --- | --- |
+| `vehicle_rates_setpoint` | **する** — PID が `IMU_GYRO_RATEMAX`（既定 400 Hz）で回り続ける | ZOH。低レートでも内側ループの帯域は落ちない |
+| `vehicle_thrust_setpoint` / `vehicle_torque_setpoint` | **しない** — トルクの到着が配分器を駆動する | **送信レート = モータ出力の更新レート** |
+
+**注意すべき非対称:** 推力だけを送っても `do_update` は立ちません。
+トルクと推力を両方送る場合は、**トルクを最後に publish** してください。
+逆順だと、配分器は「古い推力＋新しいトルク」で 1 周期分だけ配分してしまいます。
+
+つまり **「どの階層まで低レートで外から回せるか」の境界は角速度の直下**にあります。
+角速度なら 10 Hz でも内側ループの帯域は保たれますが、
+トルク／推力レベルに降りると送信レートがそのままモータ更新レートになるため、
+ROS 2 や MAVLink 経由では成立しません。
+
 > [!NOTE]
 > **位置ループとの対比 — D 項の作り方が 2 段で違います。**
 >
